@@ -17,6 +17,9 @@ NVEncoder::NVEncoder(AVFormatContext* ctx, const uint32_t& width, const uint32_t
 	encoder_ctx->height = height;
 	encoder_ctx->time_base = { 1, opts.fps }; // 30 fps
 	encoder_ctx->pix_fmt = AV_PIX_FMT_NV12; // NV12 format for NVENC
+	encoder_ctx->bit_rate = 4000000;
+	encoder_ctx->max_b_frames = 2;
+	encoder_ctx->gop_size = 10;
 
 	av_opt_set(encoder_ctx->priv_data, "preset", opts.preset, 0);
 	av_opt_set(encoder_ctx->priv_data, "profile", opts.profile, 0);
@@ -24,6 +27,48 @@ NVEncoder::NVEncoder(AVFormatContext* ctx, const uint32_t& width, const uint32_t
 
 	if (avcodec_open2(encoder_ctx, encoder, nullptr) < 0) {
 		throw std::runtime_error("Failed to open codec!");
+	}
+}
+
+NVEncoder::~NVEncoder()
+{
+	avcodec_free_context(&encoder_ctx);
+}
+
+void NVEncoder::async_send_frame(AVFrame* frame)
+{
+	fut = std::async(std::launch::async, [&]{
+		return avcodec_send_frame(encoder_ctx, frame);
+	});
+}
+
+void NVEncoder::await_receive_frame(const std::function<void(AVPacket*)>& handle_func)
+{
+	int resp = fut.get();
+	if (resp < 0) {
+		throw std::runtime_error(fmt::format("Error sending frame to encoder: {}", resp));
+	}
+
+	AVPacket* out_packet = av_packet_alloc();
+	while (avcodec_receive_packet(encoder_ctx, out_packet) >= 0) {
+		handle_func(out_packet);
+
+		// Clean up packet
+		av_packet_unref(out_packet);
+	}
+}
+
+void NVEncoder::send_receive_frame(AVFrame* frame, AVPacket& packet, const std::function<void()>& handle_func)
+{
+	if (int res = avcodec_send_frame(encoder_ctx, frame); res < 0) {
+		throw std::runtime_error(fmt::format("Error sending frame to encoder: {}", res));
+	}
+
+	while (avcodec_receive_packet(encoder_ctx, &packet) >= 0) {
+		handle_func();
+
+		// Clean up packet
+		av_packet_unref(&packet);
 	}
 }
 
